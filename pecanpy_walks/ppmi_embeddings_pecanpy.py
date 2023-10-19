@@ -50,7 +50,7 @@ def preprocess_text(text, lang):
 toTrainText = pd_dataset_test['text'].str.cat(sep=' ')
 print(toTrainText[0:2000])
 
-proc = preprocess_text(toTrainText, lang="fr")
+proc = preprocess_text(toTrainText, lang="en")
 print(proc[0:20000])
 
 word_fq_thresh = 2 #frequency to consider (drop words occurring less than 20 times)
