@@ -4,23 +4,41 @@
 import os
 import re
 import psutil
+import pandas as pd
 import numpy as np
 from multiprocessing import Pool
 from datasets import load_dataset
 from nltk.corpus import stopwords
 import networkx as nx
 import matplotlib.pyplot as plt
+import pickle
 import pecanpy
 from pecanpy import pecanpy
 
+#load in dataset, take a subset of samples & remove the fields we don't need (url, title, id) so we just have 'text'
 #ds = load_dataset("pszemraj/simple_wikipedia_LM") # EXAMPLE
-ds =  load_dataset("olm/wikipedia", language="fr", date="20231001")
-dataset = ds.remove_columns(['url', 'title', 'id'])
-
+ds = load_dataset("olm/wikipedia", language="en", date="20231001")
 # convert the dataset to a pandas df & export...
-train_dataset = dataset['train']
-pd_dataset_test = train_dataset.to_pandas()
-print(pd_dataset_test)
+train_dataset = ds['train']
+print(train_dataset)
+small_dataset = train_dataset.select(range(1000))
+pd_dataset_test = small_dataset.to_pandas()
+#train_dataset = dataset.train_test_split(test_size=0.1)
+
+
+def load_cue_words(lang, project_dir):
+    if lang == 'nl':
+        df = pd.read_csv(os.path.join(project_dir, "input_files/cue_words/test_cuelist_nl.csv"))
+    elif lang == 'fr':
+        df = pd.read_csv(os.path.join(project_dir, "input_files/cue_words/test_cuelist_fr.csv"))
+    elif lang == 'en':
+        df = pd.read_csv(os.path.join(project_dir, "input_files/cue_words/test_cuelist_en.csv"))
+    else:
+        raise ValueError("Invalid language! 3 options for this arg: 'nl', 'fr', and 'en'")
+
+    cue_words = df['word'].tolist()
+    print(f"{len(cue_words)} cue words have been loaded for '{lang}'")
+    return cue_words
 
 def preprocess_text(text, lang):
     text = text.lower()
@@ -47,16 +65,16 @@ def preprocess_text(text, lang):
 
     return tokens
 
+
 toTrainText = pd_dataset_test['text'].str.cat(sep=' ')
-print(toTrainText[0:2000])
+print(toTrainText[0:100])
+print("length of sample:", len(toTrainText))
 
 proc = preprocess_text(toTrainText, lang="en")
-print(proc[0:20000])
-
-word_fq_thresh = 2 #frequency to consider (drop words occurring less than 20 times)
+#print(proc[0:20000])
+word_fq_thresh = 100 #frequency to consider (drop words occurring less than 20 times)
 
 # get word occurence stat
-proc = proc[0:20000]
 vocab = set(proc)
 vocab_counts = {w:0 for i, w in enumerate(vocab)}
 for w in proc:
@@ -65,10 +83,14 @@ vocab = set( w for w, c in vocab_counts.items() if c > word_fq_thresh )
 
 # index corpus
 wi = {tk:i for i, tk in enumerate(vocab)}
+print(str(wi)[0:500])
 iw ={v:k for k, v in wi.items()}
 
 vocab_size = len(vocab)
-#print(iw)
+
+# save vocabulary
+with open("svd_ppmi_embeddings_vocab_test.pkl", "wb") as f:
+    pickle.dump(wi, f)
 
 #-------------------- construct PPMI Matrix -----------------#
 import tqdm
@@ -139,11 +161,13 @@ for pair in D.keys():
     col.append(pair[1])
     data.append(pmi(*pair, ppmi=True))
 ppmi_matrix = sparse.csr_matrix((data, (row, col)), shape=(vocab_size, vocab_size))
+#print("HERE IS THE PPMI MATRIX", ppmi_matrix)
 
 # sparisfy
 ppmi_matrix.eliminate_zeros()
 #print("sparse ppmi matrix (sanity check)", ppmi_matrix)
-
+#row_sums = ppmi_matrix.sum(axis=1)
+#ppmi_matrix_normalized = ppmi_matrix / row_sums[:, np.newaxis]
 ppmi_matrix_normalized = ppmi_matrix / ppmi_matrix.sum(axis=1)
 print("ppmi matrix:\n", ppmi_matrix_normalized)
 
@@ -162,7 +186,8 @@ def get_graph_from_PPMI(matrix):
     #plt.show()
     return gr
 
-
+#graph = nx.from_numpy_matrix(ppmi_matrix_normalized)
+#graph = nx.from_numpy_array(ppmi_matrix_normalized)
 graph = get_graph_from_PPMI(ppmi_matrix_normalized)
 edgelist = nx.write_edgelist(graph, "test.edgelist")
 
@@ -177,9 +202,8 @@ with open('test.edgelist', 'r') as input_file, open('processed.edgelist', 'w') a
         output_file.write(f"{source_node} {target_node} {weight}\n")
 
 #----------------- release memory --------------------#                                                                                                                                  
-del vocab
+#del vocab need for kNN word2id?
 del proc
-del wi
 del D
 del context
 del target
@@ -187,6 +211,7 @@ del row
 del col
 del data
 
+#----------------- random walks to learn embeddings --------------------#                                                                                                       
 
 ##Node2Vec Algorithm is a 2-Step representation learing algorithm...                                                                                                                     
     ##1) Use second-order random walks to generate sentences from a graph.                                                                                                               
@@ -200,6 +225,7 @@ del data
 #q=0.5,  # Defines (unormalised) probability, 1/q, for moving away from source node
 
 #using the faster pecanpy implementation https://pecanpy.readthedocs.io/en/latest/index.html
+
 import gensim
 from gensim.models import Word2Vec
 import typing_extensions
@@ -208,24 +234,72 @@ from numba import njit
 from numba import prange
 from numba_progress import ProgressBar
 
-embedding_filename = "fr_embedding_pecanpy"
-embedding_model_filename = "fr_embedding_model_pecanpy"
+embedding_filename = "en_embedding_pecanpy"
+embedding_model_filename = "en_embedding_model_pecanpy"
 # load graph object using SparseOTF mode
 g = pecanpy.SparseOTF(p=2, q=0.5, workers=1, verbose=True)
 g.read_edg("./processed.edgelist", delimiter = " ", weighted=True, directed=False)
 
 embedding_dim = 300
-walk_length = 50
+walk_length = 40
 num_walks = 10
 window = 5
 
+cues = load_cue_words(lang="en", project_dir="./")
+print(cues)
+#cue_indices = [wi[cue] for cue in cues if wi[cue] is not None]
+
+
+cue_indices = []
+for cue in cues:
+    try:
+        index = wi[cue]
+        cue_indices.append(index)
+    except KeyError:
+        pass  # Skip this cue if it doesn't exist in the dictionary
+
+print("length of cue indices: ", len(cue_indices))
+print(cue_indices)
+
+
 walks = g.simulate_walks(num_walks=num_walks, walk_length=walk_length)
+#walks = g.simulate_walks_from_nodes(num_walks=num_walks, walk_length=walk_length, start_nodes=valid_cue_indices)
 
 # use random walks to train embeddings
-w2v_model = Word2Vec(walks, vector_size=embedding_dim, window=window, min_count=word_fq_thresh, sg=1, workers=1, epochs=1)
+w2v_model = Word2Vec(walks, vector_size=embedding_dim, window=window, min_count=word_fq_thresh, sg=1, workers=1, epochs=5)
+emb_vocab = w2v_model.build_vocab(walks,update=True) #here
+print(emb_vocab)
+shape = w2v_model.wv.vectors.shape
+print(f"embeddings shape: {shape}")
 w2v_model.wv.save_word2vec_format(embedding_filename)
 w2v_model.save(embedding_model_filename)
 
+#----------------- find top 5 most similar --------------------#                                                                                              
+with open("svd_ppmi_embeddings_vocab_test.pkl", "rb") as f:
+    iw = pickle.load(f)
+    
+#cues = load_cue_words(lang="en", project_dir="./")
+#print(cues)
+#cue_indices = [iw[cue] for cue in cues]
+#print("cue indices: ", cue_indices)
+similar_words_dict = {}
 
+for cue in cues:
+    try:
+        similar_words = w2v_model.wv.most_similar(wi[cue], topn=5)
+        similar_words_dict[cue] = [(word, score) for word, score in similar_words]
+    except KeyError:
+        print(f"Cue word '{cue}' not found in the vocabulary.")
 
+for cue_word, similar_words in similar_words_dict.items():
+    print(f"Top 5 similar words for '{cue}':")
+    for word, score in similar_words:
+        print(f"Word: {word}, Similarity Score: {score}")
 
+# Convert the results to a pandas DataFrame
+results_df = pd.DataFrame([(cue, word, score) for cue, words_scores in similar_words_dict.items() for word, score in words_scores],
+                          columns=['Cue', 'Similar Word', 'Similarity Score'])
+
+# Save the results to a CSV file
+results_df.to_csv('similarity_results_ppmiRWmodel.csv', index=False)
+print(f"kNN search results have been saved to the current folder as similarity_results_ppmiRWmodel.csv")
